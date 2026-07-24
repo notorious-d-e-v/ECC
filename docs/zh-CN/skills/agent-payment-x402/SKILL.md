@@ -1,6 +1,6 @@
 ---
 name: agent-payment-x402
-description: 将 x402 支付执行添加到 AI 代理中，具备每任务预算、支出控制和非托管钱包。通过 agentwallet-sdk 支持 Base，通过 OKX Payments / OKX 代理支付协议支持 X Layer，并通过 PayAI 结算器以无 gas 的 USDC 结算支持 Solana。
+description: 将 x402 支付执行添加到 AI 代理中，具备每任务预算、支出控制和非托管钱包。通过 agentwallet-sdk 支持 Base，通过 OKX Payments / OKX 代理支付协议支持 X Layer，并通过上游 x402 包与基于结算器的结算支持 Solana 及多网络 EVM。
 origin: community
 ---
 
@@ -20,8 +20,8 @@ origin: community
 |------|------------------|
 | 代理为 Base 或其他 agentwallet 支持链上的 402 门控 API 付费 | 使用 `agentwallet-sdk` 作为 MCP 支付服务器，并配置严格的支出策略 |
 | 代理为 X Layer 上的 402 门控 API 付费 | 使用 `okx/onchainos-skills` 中的 OKX 代理支付协议；`okx-x402-payment` 是已弃用的旧别名 |
-| 代理为 Solana 上的 402 门控 API 付费 | 用 exact-SVM 方案和 Solana 签名者包装代理的 HTTP 客户端（Fetch、Axios 或 httpx），通过 PayAI 结算器结算；通过 PayAI 集市发现可付费资源 |
-| API 在 Solana 上向代理收费（TypeScript、Python 或 Go） | 添加以 `@payai/facilitator` 为后端的 x402 中间件 —— Express/Hono/Next.js 用 `@x402/*`，FastAPI 用 `x402`，Gin 用 `coinbase/x402/go` |
+| 代理为 Solana 或其他 x402 v2 网络上的 402 门控 API 付费 | 用上游的 `@x402/fetch` 或 `@x402/axios` 包包装代理的 HTTP 客户端并注册 EVM/SVM 方案；由资源服务器的结算器验证和结算 |
+| API 在 Solana 或多个网络上向代理收费（TypeScript、Python 或 Go） | 使用来自 `x402-foundation/x402` 的上游 x402 中间件 —— TypeScript 用 `@x402/express`、`@x402/hono`、`@x402/next` 或 `@x402/fastify`，Python 用 `x402`，Go 用 `github.com/x402-foundation/x402/go/v2` |
 | TypeScript API 向代理收费 | 使用面向 Express、Hono、Fastify 或 Next.js 的 OKX Payments TypeScript 卖家 SDK 文档 |
 | Go API 向代理收费 | 使用面向 Gin、Echo 或 `net/http` 的 OKX Payments Go 卖家 SDK 文档 |
 | Rust API 向代理收费 | 使用面向 Axum 的 OKX Payments Rust 卖家 SDK 文档 |
@@ -32,7 +32,7 @@ origin: community
 
 - `agentwallet-sdk`：在生产使用前，通过包文档确认当前网络覆盖范围。Base Sepolia 是最安全的开发默认值；Base 主网是原始技能所述的生产路径。
 - OKX Payments / X Layer：当前卖家文档面向 X Layer（`eip155:196`）和 USDT0 结算。由于支付包和结算器行为可能快速变化，生成生产代码前请获取当前 SDK 文档。
-- PayAI 结算器 / Solana：在 Solana 主网（`solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`）和 Solana 开发网（`solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`）上结算 USDC。结算器承担网络费用，因此付款方只需持有 USDC，无需 SOL 支付 gas。开发默认使用 Solana 开发网，生产使用 Solana 主网。该结算器支持多网络，也承接若干 EVM 链；生产前请在其 `/supported` 端点确认实时列表，而不要在此硬编码。
+- 上游 x402 包：设计上即多网络 —— 一条路由可以同时提供 Base 和 Solana，由买方选择。包默认使用 `x402.org` 结算器，它仅限测试网（Base Sepolia `eip155:84532`、Solana 开发网 `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`，以及 Stellar、Aptos、Hedera、XRPL 测试网），不适用于主网路由。生产环境请从上游文档的结算器列表中选择 —— PayAI 结算器是 Solana 主网（`solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`）及其他网络的合理默认选择，无需 API 密钥；CDP 结算器由 Coinbase 托管，对每笔交易执行 KYT/OFAC 筛查。生产前请在各结算器的 `/supported` 端点确认实时覆盖范围，而不要在此硬编码。
 
 ## 工作原理
 
@@ -101,56 +101,68 @@ x402 将 HTTP 402（需要付款）扩展为机器可协商的流程。当服务
 
 不要在未检查当前 OKX 仓库的情况下复制旧文档中的示例。当前 OKX 指南使用 `okx-agent-payments-protocol` 作为调度器，且 Java 卖家文档现已可用。
 
-### 选项 C：PayAI 结算器（Solana）
+### 选项 C：上游 x402 包（Solana + Base/EVM）
 
-当代理为在 Solana 上结算的 402 门控 API 付费时，使用此路径。与选项 A 和 B 不同，Solana 的买方流程不是独立的 MCP 服务器——你用 x402 拦截器包装代理自己的 HTTP 客户端，由它签署 USDC 转账，并让 [PayAI 结算器](https://facilitator.payai.network) 验证并结算。结算器是费用支付方，因此代理只消耗 USDC，无需 SOL 支付 gas。
+当代理在 Solana、Base 或上游协议实现支持的其他网络上付费（或你的 API 收费）时，使用此路径。位于 [`x402-foundation/x402`](https://github.com/x402-foundation/x402) 的规范 x402 monorepo 正在积极维护，并直接发布客户端和中间件包。与选项 A 和 B 不同，这不是独立的 MCP 服务器——你包装代理自己的 HTTP 客户端，由资源服务器选择的结算器验证并结算。
 
-**买方侧（代理付费）。** 用 exact-SVM 方案和 Solana 签名者包装 `fetch`（通过 `@x402/axios` 的 Axios 和通过 `x402` 包的 Python `httpx` 形式相同）：
+对于买方代理流程：
+
+1. 从维护中的 [`examples/typescript/clients`](https://github.com/x402-foundation/x402/tree/main/examples/typescript/clients) 示例（fetch、axios、MCP）开始，而不是复制旧文档中的片段。
+2. 在签署或提交第一笔付费请求之前要求明确的用户确认，与选项 B 对 OKX 流程的要求完全一致。不要将支付执行隐藏在通用工具调用之后。
+3. 锁定包版本（例如 `@x402/fetch@2.19.0`）；上游所有包以相同步调发布版本。
+4. 在每次付费调用之前立即用预算策略进行故障关闭门控——而不是在客户端构建时只做一次。
 
 ```typescript
 import { x402Client, wrapFetchWithPayment } from "@x402/fetch";
-import { registerExactSvmScheme } from "@x402/svm/exact/client";
+import { ExactEvmScheme } from "@x402/evm/exact/client";
+import { ExactSvmScheme } from "@x402/svm/exact/client";
+import { privateKeyToAccount } from "viem/accounts";
 import { createKeyPairSignerFromBytes } from "@solana/kit";
 import { base58 } from "@scure/base";
 
-// The signer key belongs to the ORCHESTRATOR's env — never hardcoded, never agent-writable.
+// Signer keys belong to the ORCHESTRATOR's env — never hardcoded, never agent-writable.
+const evmKey = process.env.EVM_PRIVATE_KEY as `0x${string}`;
 const svmKey = process.env.SVM_PRIVATE_KEY;
-if (!svmKey) {
-  throw new Error("SVM_PRIVATE_KEY is not set — refusing to start payment client");
+if (!evmKey || !svmKey) {
+  throw new Error("Signer keys are not set — refusing to start payment client");
 }
 
+// One client, both network families: the buyer pays whichever chain the 402 offers.
 const client = new x402Client();
-registerExactSvmScheme(client, {
-  signer: await createKeyPairSignerFromBytes(base58.decode(svmKey)),
-});
-
-// Gate every paid call fail-closed BEFORE wrapping — enforce per-task / per-session
-// budget and an allowlisted host, exactly like preToolCheck in the Examples section.
-await assertWithinBudget({ cost: 0.01, host: "api.example.com" });
-
+client.register("eip155:*", new ExactEvmScheme(privateKeyToAccount(evmKey)));
+client.register("solana:*", new ExactSvmScheme(await createKeyPairSignerFromBytes(base58.decode(svmKey))));
 const fetchWithPayment = wrapFetchWithPayment(fetch, client);
+
+// Minimal fail-closed gate. For the full MCP-backed version with budget
+// tracking, reuse preToolCheck from the Examples section below.
+const ALLOWED_HOSTS = new Set(["api.example.com"]);
+let sessionSpend = 0;
+function assertPaymentAllowed(url: string, maxCost: number, sessionCap = 5.0): void {
+  if (!ALLOWED_HOSTS.has(new URL(url).host)) throw new Error("Host not allowlisted — blocked");
+  if (!Number.isFinite(maxCost) || maxCost < 0) throw new Error("Invalid cost — blocked");
+  if (sessionSpend + maxCost > sessionCap) throw new Error("Session budget exceeded — blocked");
+  sessionSpend += maxCost;
+}
+
+// Gate immediately before EVERY paid call — a wrapped client checked only once
+// at construction leaves every later call unmetered.
+assertPaymentAllowed("https://api.example.com/data", 0.01);
 const res = await fetchWithPayment("https://api.example.com/data", { method: "GET" });
 ```
 
-包装后的客户端只会支付满足以下条件的挑战：`network` 是你注册的 Solana CAIP-2 id，`asset` 是预期的 USDC 铸币地址，且 `amount` 在你门控的价格之内。任何不匹配都按故障关闭处理：不签署，不重试。
+包装后的客户端只会支付 `network` 与已注册方案匹配的挑战。签署前还应验证挑战的 `asset`：在 Solana 上，USDC 主网为 `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`，开发网为 `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`。任何不匹配都按故障关闭处理：不签署，不重试。在 exact-SVM 方案中，结算器是交易费用支付方，因此买方钱包只需持有 USDC——无需 SOL 支付 gas。
 
-**发现。** 通过 PayAI 集市发现可付费的 Solana 资源，而不是硬编码端点：
+**结算器选择。** 包默认使用 [`x402.org` 结算器](https://x402.org/facilitator)——仅限测试网（Base Sepolia、Solana 开发网等），零配置，适合开发。主网请从上游文档的[结算器列表](https://docs.x402.org/dev-tools/facilitators)中选择：[PayAI 结算器](https://facilitator.payai.network) 是合理的生产默认选择（包括 Solana 主网在内的多网络，无需 API 密钥），CDP 结算器由 Coinbase 托管并对每笔交易执行 KYT/OFAC 筛查。也可以自行运行结算器或自结算。
 
-```bash
-curl -s 'https://facilitator.payai.network/discovery/resources' | jq '.'
-```
+**卖方侧（API 向代理收费）。** 使用上游中间件；一条路由可以同时提供 Base 和 Solana（可运行版本参见 [`examples/typescript/servers`](https://github.com/x402-foundation/x402/tree/main/examples/typescript/servers)）：
 
-**卖方侧（API 向代理收费）。** 添加以 `@payai/facilitator` 为后端的 x402 中间件。每个 starter 都会脚手架出一个可用的 Solana 服务器或客户端；生产环境请锁定版本，而不要追踪 `@latest`：
+| 运行时 | 包 |
+|---------|---------|
+| Express / Hono / Next.js / Fastify | `@x402/express@2.19.0`、`@x402/hono@2.19.0`、`@x402/next@2.19.0`、`@x402/fastify@2.19.0` |
+| Python（FastAPI、Flask） | PyPI 上的 `x402` |
+| Go（Gin、Echo、`net/http`） | `github.com/x402-foundation/x402/go/v2` |
 
-| 运行时 | 脚手架 |
-|---------|----------|
-| Express 服务器 | `npx @payai/x402-express-starter@latest my-server` |
-| Hono 服务器 | `npx @payai/x402-hono-starter@latest my-server` |
-| Next.js 全栈 | `npx @payai/x402-next-starter@latest my-app` |
-| Fetch 客户端 | `npx @payai/x402-fetch-starter@latest my-client` |
-| Axios 客户端 | `npx @payai/x402-axios-starter@latest my-client` |
-
-在将代理指向真实商户之前，先对 [x402.payai.network](https://x402.payai.network) 的 PayAI Echo Merchant 进行免费的端到端测试——它暴露 Solana 开发网和主网路径，退还代币并承担费用。
+**发现。** 实现 x402 集市扩展的结算器会公开 `/discovery/resources` 端点——可在 `https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources` 查询 CDP 目录，在 `https://facilitator.payai.network/discovery/resources` 查询 PayAI 目录。对于 Solana 可付费服务，还有 Solana 基金会的精选目录 [pay.sh](https://pay.sh)。
 
 ## 示例
 
@@ -266,8 +278,8 @@ main().catch((err) => {
 - **审计追踪**：在任务后钩子中使用 `list_transactions` 记录支出内容和原因。
 - **故障关闭**：如果支付工具不可达，阻止付费操作——不要回退到无计量访问。
 - **配合 security-review**：支付工具是高权限操作。应用与 shell 访问相同的审查标准。
-- **先在测试网测试**：开发时使用 Base Sepolia；生产环境切换到 Base 主网。在 Solana 上，先使用 Solana 开发网（`solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`）和免费的 PayAI Echo Merchant，再上主网。
-- **在 Solana 上注入 USDC 而非 SOL**：PayAI 结算器承担网络费用，因此没有 SOL 的钱包也能付费。签署前验证每个挑战的 `asset` 是预期的 USDC 铸币地址——一个会支付任意资产的包装客户端是预算上的漏洞。
+- **先在测试网测试**：开发时使用 Base Sepolia；生产环境切换到 Base 主网。在 Solana 上，先针对 Solana 开发网（`solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`）和免费的 x402.org 结算器开发，再转到主网的生产结算器。
+- **在 Solana 上注入 USDC 而非 SOL**：exact-SVM 方案让结算器成为交易费用支付方，因此没有 SOL 的钱包也能付费。签署前将每个挑战的 `asset` 与预期的 USDC 铸币地址核对（主网 `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`，开发网 `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`）——一个会支付任意资产的包装客户端是预算上的漏洞。
 
 ## 生产参考
 
@@ -277,7 +289,8 @@ main().catch((err) => {
 - **OKX Payments SDK**：[`okx/payments`](https://github.com/okx/payments) — 面向 X Layer x402 的 TypeScript、Go、Rust 和 Java 卖家集成
 - **OKX 代理支付协议技能**：[`okx/onchainos-skills`](https://github.com/okx/onchainos-skills/tree/main/skills/okx-agent-payments-protocol)
 - **OKX Payments 概览**：[web3.okx.com/onchainos/dev-docs/payments/overview](https://web3.okx.com/onchainos/dev-docs/payments/overview)
-- **PayAI 结算器（Solana x402）**：[facilitator.payai.network](https://facilitator.payai.network) — 具备无 gas Solana USDC 结算的多网络结算器；实时资源集市位于 `/discovery/resources`
-- **PayAI 文档**：[docs.payai.network](https://docs.payai.network)
-- **PayAI starter 与 Echo Merchant**：[npm 上的 `@payai`](https://www.npmjs.com/org/payai)；在 [x402.payai.network](https://x402.payai.network) 进行免费的端到端测试
-- **GitHub 上的 PayAI**：[`PayAINetwork`](https://github.com/PayAINetwork)
+- **上游 x402 monorepo**：[`x402-foundation/x402`](https://github.com/x402-foundation/x402) — TypeScript、Python 和 Go 实现，以及维护中的客户端和服务器示例
+- **x402 文档**：[docs.x402.org](https://docs.x402.org)；生产结算器列表位于 [docs.x402.org/dev-tools/facilitators](https://docs.x402.org/dev-tools/facilitators)
+- **`@x402` 包**：[npmjs.com/org/x402](https://www.npmjs.com/org/x402) — `@x402/fetch`、`@x402/axios`、`@x402/express`、`@x402/hono`、`@x402/next`、`@x402/fastify`、`@x402/evm`、`@x402/svm`
+- **结算器**：[x402.org 结算器](https://x402.org/facilitator)（测试网默认）、[PayAI](https://facilitator.payai.network)（多网络生产，无需 API 密钥）、[CDP](https://docs.cdp.coinbase.com/x402/docs/quickstart-sellers)（Coinbase 托管，KYT/OFAC）
+- **发现**：CDP 与 PayAI 集市位于 `/discovery/resources`；Solana 可付费服务见 [pay.sh](https://pay.sh)
